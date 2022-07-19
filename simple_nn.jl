@@ -23,7 +23,7 @@ end
 
 function Forward(net::Network, a::Vector{Float32})
     for layer in 1:length(net.weights)
-        a = net.layers[layer].activation.(net.layers[layer].operation(net, layer, a))
+        a = net.layers[layer].activation(net.layers[layer].operation(net, layer, a))
     end
     
     return a
@@ -54,11 +54,15 @@ function none_activation(z)
 end
 
 function sigmoid_activation(z)
-    return 1 / (1 + exp(-z))
+    return 1 ./ (1 .+ exp.(-z))
 end
 
 function relu_activation(z)
-    return max(Float32(0.0), z)
+    return max.(Float32(0.0), z)
+end
+
+function softmax_activation(z)
+    return exp.(z) ./ sum(exp.(z))
 end
 
 # optimizer stuff
