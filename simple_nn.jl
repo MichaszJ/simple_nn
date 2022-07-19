@@ -82,6 +82,29 @@ function get_optimizer_params(net::Network, optimizer; optimizer_params...)
             "weights_momentum_vector" => [zeros(size(layer)) for layer in net.weights],
             "biases_momentum_vector" => [zeros(size(layer)) for layer in net.biases]
         ])
+    elseif string(optimizer) == "RMSpropOptimizer!"
+        params = Dict([
+            "optimizer" => optimizer,
+            "optimizer_name" => "RMSpropOptimizer!",
+            "learning_rate" => 0.01,
+            "moving_average" => 0.9,
+            "epsilon" => 1.0e-8,
+            "weights_grad_vec" => [zeros(size(layer)) for layer in net.weights],
+            "biases_grad_vec" => [zeros(size(layer)) for layer in net.biases]
+        ])
+    elseif string(optimizer) == "AdamOptimizer!"
+        params = Dict([
+           "optimizer" => optimizer,
+           "optimizer_name" => "AdamOptimizer!",
+           "decay_1" => 0.9,
+           "decay_2" => 0.999,
+           "step_size" => 0.01,
+           "epsilon" => 1.0e-8,
+           "weights_m" => [zeros(size(layer)) for layer in net.weights],
+           "weights_v" => [zeros(size(layer)) for layer in net.weights],
+           "biases_m" => [zeros(size(layer)) for layer in net.biases],
+           "biases_v" => [zeros(size(layer)) for layer in net.biases]
+       ])
     end
     
     if length(optimizer_params) > 0
@@ -104,4 +127,33 @@ function MomentumOptimizer!(net::Network, grad)
     
     net.params["biases_momentum_vector"] = net.params["gamma"] * net.params["biases_momentum_vector"] + net.params["learning_rate"] * grad[net.biases]
     net.biases = net.biases .- net.params["biases_momentum_vector"]
+end
+
+function RMSpropOptimizer!(net::Network, grad) 
+    for layer in 1:length(net.layers)
+        net.params["weights_grad_vec"][layer] = net.params["moving_average"] .* net.params["weights_grad_vec"][layer] .+ (1 .- net.params["moving_average"]) .* grad[net.weights][layer].^2
+        net.params["biases_grad_vec"][layer] = net.params["moving_average"] .* net.params["biases_grad_vec"][layer] .+ (1 .- net.params["moving_average"]) .* grad[net.biases][layer].^2
+        
+        net.weights[layer] = net.weights[layer] .- net.params["learning_rate"] ./ sqrt.(net.params["weights_grad_vec"][layer] .+ net.params["epsilon"]) .* grad[net.weights][layer]
+        net.biases[layer] = net.biases[layer] .- net.params["learning_rate"] ./ sqrt.(net.params["biases_grad_vec"][layer] .+ net.params["epsilon"]) .* grad[net.biases][layer]
+    end
+end
+
+function AdamOptimizer!(net::Network, grad)
+    for layer in 1:length(net.layers)
+        net.params["weights_m"][layer] = net.params["decay_1"] .* net.params["weights_m"][layer] .+ (1 .- net.params["decay_1"]) .* grad[net.weights][layer]
+        weights_m_hat = net.params["weights_m"][layer] ./ (1 .- net.params["decay_1"])
+        
+        net.params["weights_v"][layer] = net.params["decay_2"] .* net.params["weights_v"][layer] .+ (1 .- net.params["decay_2"]) .* grad[net.weights][layer].^2
+        weights_v_hat = net.params["weights_v"][layer] ./ (1 .- net.params["decay_2"])
+        
+        net.params["biases_m"][layer] = net.params["decay_1"] .* net.params["biases_m"][layer] .+ (1 .- net.params["decay_1"]) .* grad[net.biases][layer]
+        biases_m_hat = net.params["biases_m"][layer] ./ (1 .- net.params["decay_1"])
+        
+        net.params["biases_v"][layer] = net.params["decay_2"] .* net.params["biases_v"][layer] .+ (1 .- net.params["decay_2"]) .* grad[net.biases][layer].^2
+        biases_v_hat = net.params["biases_v"][layer] ./ (1 .- net.params["decay_2"])
+        
+        net.weights[layer] = net.weights[layer] .- weights_m_hat .* (net.params["step_size"] ./ (sqrt.(weights_v_hat) .+ net.params["epsilon"]))
+        net.biases[layer] = net.biases[layer] .- biases_m_hat .* (net.params["step_size"] ./ (sqrt.(biases_v_hat) .+ net.params["epsilon"]))
+    end
 end
