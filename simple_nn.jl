@@ -8,17 +8,17 @@ end
 mutable struct Network
     layers::Vector{Layer}
     sizes::Vector{Int}
-    biases::Vector{Vector{Float32}}
-    weights::Vector{Matrix{Float32}}
+    biases::Vector
+    weights::Vector
     params::Dict
 end
 
-function CreateNetwork(setup)
-    layers = [Layer(layer[1], layer[2], layer[3]) for layer in setup[2:end]]
-    sizes = [layer[1] for layer in setup]
-    biases = rand.(Normal(), sizes[2:end])
-    weights = rand.(Normal(), sizes[2:end], sizes[1:end-1])
-    return Network(layers, sizes, biases, weights, Dict())
+function CreateNetwork(setup; datatype=Float32, init_distribution=Normal())
+    layers = [Layer(layer[1][2], layer[2], layer[3]) for layer in setup]
+    sizes = vcat([setup[1][1][1]], [layer[1][2] for layer in setup])
+    biases = [convert.(datatype, layer) for layer in rand.(init_distribution, sizes[2:end])]
+    weights = [convert.(datatype, layer) for layer in rand.(init_distribution, sizes[2:end], sizes[1:end-1])]
+    return Network(layers, sizes, biases, weights, Dict(["datatype => datatype"]))
 end
 
 function Forward(net::Network, a::Vector{Float32})
@@ -44,7 +44,7 @@ end
 
 # functions
 # layer types
-function dense_layer(net::Network, layer::Int, a::Vector{Float32})
+function dense_layer(net::Network, layer::Int, a)
     return vec(a' * net.weights[layer]') .+ net.biases[layer]
 end
 
