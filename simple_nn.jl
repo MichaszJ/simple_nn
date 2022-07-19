@@ -21,7 +21,7 @@ function CreateNetwork(setup)
     return Network(layers, sizes, biases, weights, Dict())
 end
 
-function FeedForward(net::Network, a::Vector{Float32})
+function Forward(net::Network, a::Vector{Float32})
     for layer in 1:length(net.weights)
         a = net.layers[layer].activation.(net.layers[layer].operation(net, layer, a))
     end
@@ -55,6 +55,10 @@ end
 
 function sigmoid_activation(z)
     return 1 / (1 + exp(-z))
+end
+
+function relu_activation(z)
+    return max(Float32(0.0), z)
 end
 
 # optimizer stuff
