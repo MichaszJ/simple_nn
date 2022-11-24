@@ -1,29 +1,81 @@
 using LinearAlgebra, Distributions, Random, Zygote
-struct Layer
-    size::Int
+
+struct DenseLayer
+    size::Tuple{Int, Int}
+    params::Dict
     operation::Function
     activation::Function
+
+    function DenseLayer(size::Tuple{Int, Int}, activation::Function; params=Dict())
+        return new(size, params, dense_layer, activation)
+    end
+end
+
+struct ConvLayer
+    size::Tuple{Int, Int, Int}  # in channels, out channels, kernel size
+    params::Dict                # padding, stride
+    operation::Function
+    activation::Function
+
+    function ConvLayer(size::Tuple{Int, Int, Int}, activation::Function; params=Dict("Stride" => 1, "Padding" => 1))
+        return new(size, params, conv_2d_layer, activation)
+    end
+end
+
+struct PoolLayer
+    size::Tuple{Int, Int, Int}  # in channels, out channels, kernel size
+    params::Dict                # padding, stride
+    operation::Function
+    pool_function::Function
+
+    function ConvLayer(size::Tuple{Int, Int, Int}, pool_operation::Function; params=Dict("Stride" => 1, "Padding" => 1))
+        return new(size, params, pool_2d, pool_operation)
+    end
 end
 
 mutable struct Network
-    layers::Vector{Layer}
-    sizes::Vector{Int}
+    layers::Vector
     biases::Vector
     weights::Vector
     params::Dict
 end
 
 function CreateNetwork(setup; datatype=Float32, init_distribution=Normal())
-    layers = [Layer(layer[1][2], layer[2], layer[3]) for layer in setup]
-    sizes = vcat([setup[1][1][1]], [layer[1][2] for layer in setup])
-    biases = [convert.(datatype, layer) for layer in rand.(init_distribution, sizes[2:end])]
-    weights = [convert.(datatype, layer) for layer in rand.(init_distribution, sizes[2:end], sizes[1:end-1])]
-    return Network(layers, sizes, biases, weights, Dict(["datatype => datatype"]))
+    biases, weights = [], []
+    for layer in setup
+        if typeof(layer) == DenseLayer
+            push!(biases, convert.(datatype, rand(init_distribution, layer.size[2])))
+            push!(weights, convert.(datatype, rand(init_distribution, layer.size[2], layer.size[1])))
+
+        elseif typeof(layer) == ConvLayer || typeof(layer) == PoolLayer
+            push!(biases, [
+                convert.(datatype, rand(init_distribution)) for _ in 1:layer.size[2]
+            ])
+
+            push!(weights, [
+                [convert.(datatype, rand(init_distribution, layer.size[3], layer.size[3])) for _ in 1:layer.size[1]] for _ in 1:layer.size[2]
+            ])
+        end
+    end
+    
+    return Network(setup, biases, weights, Dict(["datatype" => datatype]))
 end
 
-function Forward(net::Network, a::Vector{Float32})
+function Forward(net::Network, a)
     for layer in 1:length(net.weights)
-        a = net.layers[layer].activation(net.layers[layer].operation(net, layer, a))
+        if typeof(net.layers[layer]) == DenseLayer
+            if layer > 1 && (typeof(net.layers[layer-1]) == ConvLayer || typeof(net.layers[layer]) == PoolLayer)
+                a = vec(vcat(a...))
+            end
+
+            a = net.layers[layer].activation(net.layers[layer].operation(net, layer, a))
+        
+        elseif typeof(net.layers[layer]) == ConvLayer
+            a = [net.layers[layer].activation.(mat) for mat in net.layers[layer].operation(net, layer, a)]
+        
+        elseif typeof(net.layers[layer]) == PoolLayer
+            a = net.layers[layer].operation(net, layer, a)
+        end
     end
     
     return a
@@ -35,17 +87,65 @@ function OptimizerSetup!(net::Network, optimizer; optimizer_params...)
 end
 
 function Backward!(net::Network, loss_function, x, y)
-    grad = gradient(Params([net.weights, net.biases])) do
+    weight_grad = gradient(Params([net.weights])) do
+        loss_function(x, y)
+    end
+
+    bias_grad = gradient(Params([net.biases])) do
         loss_function(x, y)
     end
     
-    net.params["optimizer"](net, grad)
+    net.params["optimizer"](net, weight_grad[net.weights], bias_grad[net.biases])
 end
 
 # functions
 # layer types
 function dense_layer(net::Network, layer::Int, a)
     return vec(a' * net.weights[layer]') .+ net.biases[layer]
+end
+
+feature_dim(image_dim, kernel_dim, padding, stride) = Int((image_dim - kernel_dim + 2*padding) / stride + 1)
+
+# function pad_matrix(matrix, padding; pad_value=0)
+#     padded_matrix = ones(size(matrix) .+ 2*padding) .* pad_value
+#     padded_matrix[1+padding:end-padding, 1+padding:end-padding] = matrix
+
+#     return padded_matrix
+# end
+
+function pad_matrix(mat, padding; pad_value=0.0)
+    n = size(mat, 2)    
+    return Matrix(PaddedView(pad_value, mat, (n + 2*padding, n + 2*padding), (1 + padding, 1 + padding)))
+end
+
+function conv_2d_layer(net::Network, layer::Int, a)
+    conv_layer = net.layers[layer]
+    # weights = net.weights[layer]
+    # biases = net.biases[layer]
+    padding, stride = conv_layer.params["Padding"], conv_layer.params["Stride"]
+    
+    n_f = feature_dim(size(a[1], 1), size(net.weights[layer][1][1], 1), padding, stride)
+    n_k = size(net.weights[layer][1][1], 1)
+
+    output_volume = [[
+        sum([
+            dot(image[(m + (m-1)*(stride-1)):m + (m-1)*(stride-1)+(n_k-1), (n + (n-1)*(stride-1)):n + (n-1)*(stride-1)+(n_k-1)], net.weights[layer][v][i]) for (i, image) in enumerate(a)
+        ]) .+ net.biases[layer][v] for m in 1:n_f, n in 1:n_f
+    ] for v in 1:size(net.weights[layer], 1)]
+    
+    return output_volume
+end
+
+function pool_2d(net::Network, layer::Int, a)
+    stride = net.layers[layer].params("Stride")
+
+    n_f = feature_dim(size(a[1], 1), length(a), 0, stride)
+
+    output_volume = [
+        net.layers[layer].pool_operation.([mat[(m + (m-1)*(stride-1)):m + (m-1)*(stride-1)+(kernel_size-1), (n + (n-1)*(stride-1)):n + (n-1)*(stride-1)+(kernel_size-1)] for m in 1:n_f, n in 1:n_f]...) for mat in a
+    ]
+
+    return output_volume
 end
 
 # activation functions
@@ -116,16 +216,16 @@ function get_optimizer_params(net::Network, optimizer; optimizer_params...)
     return params
 end
 
-function GradientDescentOptimizer!(net::Network, grad)
-    net.weights = net.weights .- net.params["learning_rate"] * grad[net.weights]
-    net.biases = net.biases .- net.params["learning_rate"] * grad[net.biases]
+function GradientDescentOptimizer!(net::Network, weight_grad, bias_grad)
+    net.weights = net.weights .- net.params["learning_rate"] * weight_grad
+    net.biases = net.biases .- net.params["learning_rate"] * bias_grad
 end
 
-function MomentumOptimizer!(net::Network, grad)
-    net.params["weights_momentum_vector"] = net.params["gamma"] * net.params["weights_momentum_vector"] + net.params["learning_rate"] * grad[net.weights]
+function MomentumOptimizer!(net::Network, weight_grad, bias_grad)
+    net.params["weights_momentum_vector"] = net.params["gamma"] * net.params["weights_momentum_vector"] + net.params["learning_rate"] * weight_grad
     net.weights = net.weights .- net.params["weights_momentum_vector"]
     
-    net.params["biases_momentum_vector"] = net.params["gamma"] * net.params["biases_momentum_vector"] + net.params["learning_rate"] * grad[net.biases]
+    net.params["biases_momentum_vector"] = net.params["gamma"] * net.params["biases_momentum_vector"] + net.params["learning_rate"] * bias_grad
     net.biases = net.biases .- net.params["biases_momentum_vector"]
 end
 
