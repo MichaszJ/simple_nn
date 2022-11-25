@@ -1,4 +1,4 @@
-using LinearAlgebra, Distributions, Random, Zygote
+using LinearAlgebra, Distributions, Random, Zygote, PaddedViews
 
 struct DenseLayer
     size::Tuple{Int, Int}
@@ -28,8 +28,8 @@ struct PoolLayer
     operation::Function
     pool_function::Function
 
-    function ConvLayer(size::Tuple{Int, Int, Int}, pool_operation::Function; params=Dict("Stride" => 1, "Padding" => 1))
-        return new(size, params, pool_2d, pool_operation)
+    function PoolLayer(size::Tuple{Int, Int, Int}, pool_operation::Function; params=Dict("Stride" => 1, "Padding" => 1))
+        return new(size, params, pool_2d_layer, pool_operation)
     end
 end
 
@@ -52,9 +52,7 @@ function CreateNetwork(setup; datatype=Float32, init_distribution=Normal())
                 convert.(datatype, rand(init_distribution)) for _ in 1:layer.size[2]
             ])
 
-            push!(weights, [
-                [convert.(datatype, rand(init_distribution, layer.size[3], layer.size[3])) for _ in 1:layer.size[1]] for _ in 1:layer.size[2]
-            ])
+            push!(weights, convert.(datatype, rand(init_distribution, layer.size[3], layer.size[3], layer.size[1], layer.size[2])))
         end
     end
     
@@ -65,7 +63,7 @@ function Forward(net::Network, a)
     for layer in 1:length(net.weights)
         if typeof(net.layers[layer]) == DenseLayer
             if layer > 1 && (typeof(net.layers[layer-1]) == ConvLayer || typeof(net.layers[layer]) == PoolLayer)
-                a = vec(vcat(a...))
+                a = vcat(a...)
             end
 
             a = net.layers[layer].activation(net.layers[layer].operation(net, layer, a))
@@ -106,44 +104,33 @@ end
 
 feature_dim(image_dim, kernel_dim, padding, stride) = Int((image_dim - kernel_dim + 2*padding) / stride + 1)
 
-# function pad_matrix(matrix, padding; pad_value=0)
-#     padded_matrix = ones(size(matrix) .+ 2*padding) .* pad_value
-#     padded_matrix[1+padding:end-padding, 1+padding:end-padding] = matrix
-
-#     return padded_matrix
-# end
-
 function pad_matrix(mat, padding; pad_value=0.0)
     n = size(mat, 2)    
     return Matrix(PaddedView(pad_value, mat, (n + 2*padding, n + 2*padding), (1 + padding, 1 + padding)))
 end
 
-function conv_2d_layer(net::Network, layer::Int, a)
-    conv_layer = net.layers[layer]
-    # weights = net.weights[layer]
-    # biases = net.biases[layer]
-    padding, stride = conv_layer.params["Padding"], conv_layer.params["Stride"]
-    
-    n_f = feature_dim(size(a[1], 1), size(net.weights[layer][1][1], 1), padding, stride)
-    n_k = size(net.weights[layer][1][1], 1)
+function conv_2d_layer(net::Network, layer::Int, a) 
+    padding, stride = net.layers[layer].params["Padding"], net.layers[layer].params["Stride"]
 
-    output_volume = [[
-        sum([
-            dot(image[(m + (m-1)*(stride-1)):m + (m-1)*(stride-1)+(n_k-1), (n + (n-1)*(stride-1)):n + (n-1)*(stride-1)+(n_k-1)], net.weights[layer][v][i]) for (i, image) in enumerate(a)
-        ]) .+ net.biases[layer][v] for m in 1:n_f, n in 1:n_f
-    ] for v in 1:size(net.weights[layer], 1)]
-    
+    n_f = feature_dim(size(a, 1), size(net.weights[layer], 1), padding, stride)
+    n_k = size(net.weights[layer], 1)
+
+    output_volume = cat([[
+        dot(a[(m + (m-1)*(stride-1)):m + (m-1)*(stride-1)+(n_k-1), (n + (n-1)*(stride-1)):n + (n-1)*(stride-1)+(n_k-1), :], net.weights[layer][:, :, :, i]) for m in 1:n_f, n in 1:n_f
+    ] .+ net.biases[layer][i] for i in 1:size(net.weights[layer], 4)]..., dims=3)
+
     return output_volume
 end
 
-function pool_2d(net::Network, layer::Int, a)
-    stride = net.layers[layer].params("Stride")
+function pool_2d_layer(net::Network, layer::Int, a)
+    padding, stride = net.layers[layer].params["Padding"], net.layers[layer].params["Stride"]
 
-    n_f = feature_dim(size(a[1], 1), length(a), 0, stride)
+    n_f = feature_dim(size(a, 1), size(net.weights[layer], 1), padding, stride)
+    n_k = size(net.weights[layer], 1)
 
-    output_volume = [
-        net.layers[layer].pool_operation.([mat[(m + (m-1)*(stride-1)):m + (m-1)*(stride-1)+(kernel_size-1), (n + (n-1)*(stride-1)):n + (n-1)*(stride-1)+(kernel_size-1)] for m in 1:n_f, n in 1:n_f]...) for mat in a
-    ]
+    output_volume = cat([[
+        net.layers[layer].pool_function(a[(m + (m-1)*(stride-1)):m + (m-1)*(stride-1)+(n_k-1), (n + (n-1)*(stride-1)):n + (n-1)*(stride-1)+(n_k-1), :], net.weights[layer][:, :, :, i]) for m in 1:n_f, n in 1:n_f
+    ] for i in 1:size(net.weights[layer], 4)]..., dims=3)
 
     return output_volume
 end
@@ -229,28 +216,28 @@ function MomentumOptimizer!(net::Network, weight_grad, bias_grad)
     net.biases = net.biases .- net.params["biases_momentum_vector"]
 end
 
-function RMSpropOptimizer!(net::Network, grad) 
+function RMSpropOptimizer!(net::Network, weight_grad, bias_grad) 
     for layer in 1:length(net.layers)
-        net.params["weights_grad_vec"][layer] = net.params["moving_average"] .* net.params["weights_grad_vec"][layer] .+ (1 .- net.params["moving_average"]) .* grad[net.weights][layer].^2
-        net.params["biases_grad_vec"][layer] = net.params["moving_average"] .* net.params["biases_grad_vec"][layer] .+ (1 .- net.params["moving_average"]) .* grad[net.biases][layer].^2
+        net.params["weights_grad_vec"][layer] = net.params["moving_average"] .* net.params["weights_grad_vec"][layer] .+ (1 .- net.params["moving_average"]) .* weight_grad[layer].^2
+        net.params["biases_grad_vec"][layer] = net.params["moving_average"] .* net.params["biases_grad_vec"][layer] .+ (1 .- net.params["moving_average"]) .* bias_grad[layer].^2
         
-        net.weights[layer] = net.weights[layer] .- net.params["learning_rate"] ./ sqrt.(net.params["weights_grad_vec"][layer] .+ net.params["epsilon"]) .* grad[net.weights][layer]
-        net.biases[layer] = net.biases[layer] .- net.params["learning_rate"] ./ sqrt.(net.params["biases_grad_vec"][layer] .+ net.params["epsilon"]) .* grad[net.biases][layer]
+        net.weights[layer] = net.weights[layer] .- net.params["learning_rate"] ./ sqrt.(net.params["weights_grad_vec"][layer] .+ net.params["epsilon"]) .* weight_grad[layer]
+        net.biases[layer] = net.biases[layer] .- net.params["learning_rate"] ./ sqrt.(net.params["biases_grad_vec"][layer] .+ net.params["epsilon"]) .* bias_grad[layer]
     end
 end
 
-function AdamOptimizer!(net::Network, grad)
+function AdamOptimizer!(net::Network, weight_grad, bias_grad)
     for layer in 1:length(net.layers)
-        net.params["weights_m"][layer] = net.params["decay_1"] .* net.params["weights_m"][layer] .+ (1 .- net.params["decay_1"]) .* grad[net.weights][layer]
+        net.params["weights_m"][layer] = net.params["decay_1"] .* net.params["weights_m"][layer] .+ (1 .- net.params["decay_1"]) .* weight_grad[layer]
         weights_m_hat = net.params["weights_m"][layer] ./ (1 .- net.params["decay_1"])
         
-        net.params["weights_v"][layer] = net.params["decay_2"] .* net.params["weights_v"][layer] .+ (1 .- net.params["decay_2"]) .* grad[net.weights][layer].^2
+        net.params["weights_v"][layer] = net.params["decay_2"] .* net.params["weights_v"][layer] .+ (1 .- net.params["decay_2"]) .* weight_grad[layer].^2
         weights_v_hat = net.params["weights_v"][layer] ./ (1 .- net.params["decay_2"])
         
-        net.params["biases_m"][layer] = net.params["decay_1"] .* net.params["biases_m"][layer] .+ (1 .- net.params["decay_1"]) .* grad[net.biases][layer]
+        net.params["biases_m"][layer] = net.params["decay_1"] .* net.params["biases_m"][layer] .+ (1 .- net.params["decay_1"]) .* bias_grad[layer]
         biases_m_hat = net.params["biases_m"][layer] ./ (1 .- net.params["decay_1"])
         
-        net.params["biases_v"][layer] = net.params["decay_2"] .* net.params["biases_v"][layer] .+ (1 .- net.params["decay_2"]) .* grad[net.biases][layer].^2
+        net.params["biases_v"][layer] = net.params["decay_2"] .* net.params["biases_v"][layer] .+ (1 .- net.params["decay_2"]) .* bias_grad[layer].^2
         biases_v_hat = net.params["biases_v"][layer] ./ (1 .- net.params["decay_2"])
         
         net.weights[layer] = net.weights[layer] .- weights_m_hat .* (net.params["step_size"] ./ (sqrt.(weights_v_hat) .+ net.params["epsilon"]))
