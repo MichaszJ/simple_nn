@@ -47,7 +47,7 @@ function CreateNetwork(setup; datatype=Float32, init_distribution=Normal())
             push!(biases, convert.(datatype, rand(init_distribution, layer.size[2])))
             push!(weights, convert.(datatype, rand(init_distribution, layer.size[2], layer.size[1])))
 
-        elseif typeof(layer) == ConvLayer || typeof(layer) == PoolLayer
+        elseif typeof(layer) == ConvLayer
             push!(biases, [
                 convert.(datatype, rand(init_distribution)) for _ in 1:layer.size[2]
             ])
@@ -62,14 +62,14 @@ end
 function Forward(net::Network, a)
     for layer in 1:length(net.weights)
         if typeof(net.layers[layer]) == DenseLayer
-            if layer > 1 && (typeof(net.layers[layer-1]) == ConvLayer || typeof(net.layers[layer]) == PoolLayer)
-                a = vcat(a...)
-            end
-
             a = net.layers[layer].activation(net.layers[layer].operation(net, layer, a))
         
         elseif typeof(net.layers[layer]) == ConvLayer
-            a = [net.layers[layer].activation.(mat) for mat in net.layers[layer].operation(net, layer, a)]
+            # why doesn't this work?
+            # causes error during backwards pass, works fine on forward pass
+            # a = net.layers[layer].activation(net.layers[layer].operation(net, layer, a))
+
+            a = [net.layers[layer].activation(mat) for mat in net.layers[layer].operation(net, layer, a)]
         
         elseif typeof(net.layers[layer]) == PoolLayer
             a = net.layers[layer].operation(net, layer, a)
@@ -99,7 +99,11 @@ end
 # functions
 # layer types
 function dense_layer(net::Network, layer::Int, a)
-    return vec(a' * net.weights[layer]') .+ net.biases[layer]
+    if ndims(a) > 1
+        return vec(vcat(a...)' * net.weights[layer]') .+ net.biases[layer]
+    else
+        return vec(a' * net.weights[layer]') .+ net.biases[layer]
+    end    
 end
 
 feature_dim(image_dim, kernel_dim, padding, stride) = Int((image_dim - kernel_dim + 2*padding) / stride + 1)
@@ -115,22 +119,22 @@ function conv_2d_layer(net::Network, layer::Int, a)
     n_f = feature_dim(size(a, 1), size(net.weights[layer], 1), padding, stride)
     n_k = size(net.weights[layer], 1)
 
-    output_volume = cat([[
-        dot(a[(m + (m-1)*(stride-1)):m + (m-1)*(stride-1)+(n_k-1), (n + (n-1)*(stride-1)):n + (n-1)*(stride-1)+(n_k-1), :], net.weights[layer][:, :, :, i]) for m in 1:n_f, n in 1:n_f
-    ] .+ net.biases[layer][i] for i in 1:size(net.weights[layer], 4)]..., dims=3)
+    output_volume = [
+        dot(a[(m + (m-1)*(stride-1)):m + (m-1)*(stride-1)+(n_k-1), (n + (n-1)*(stride-1)):n + (n-1)*(stride-1)+(n_k-1), :], net.weights[layer][:, :, :, i]) .+ net.biases[layer][i] for m in 1:n_f, n in 1:n_f, i in 1:size(net.weights[layer], 4)
+    ]
 
     return output_volume
 end
 
 function pool_2d_layer(net::Network, layer::Int, a)
-    padding, stride = net.layers[layer].params["Padding"], net.layers[layer].params["Stride"]
+    stride = net.layers[layer].params["Stride"]
 
-    n_f = feature_dim(size(a, 1), size(net.weights[layer], 1), padding, stride)
-    n_k = size(net.weights[layer], 1)
+    n_k = mnist_cnn_network.layers[2].size[3]
+    n_f = Int((size(a, 1) - n_k)/stride + 1)
 
-    output_volume = cat([[
-        net.layers[layer].pool_function(a[(m + (m-1)*(stride-1)):m + (m-1)*(stride-1)+(n_k-1), (n + (n-1)*(stride-1)):n + (n-1)*(stride-1)+(n_k-1), :], net.weights[layer][:, :, :, i]) for m in 1:n_f, n in 1:n_f
-    ] for i in 1:size(net.weights[layer], 4)]..., dims=3)
+    output_volume = [
+        net.layers[layer].pool_function(a[(m + (m-1)*(stride-1)):m + (m-1)*(stride-1)+(n_k-1), (n + (n-1)*(stride-1)):n + (n-1)*(stride-1)+(n_k-1), i]...) for m in 1:n_f, n in 1:n_f, i in 1:size(a, 3)
+    ] 
 
     return output_volume
 end
@@ -208,6 +212,7 @@ function GradientDescentOptimizer!(net::Network, weight_grad, bias_grad)
     net.biases = net.biases .- net.params["learning_rate"] * bias_grad
 end
 
+# figure out why these other optimizers do not work with CNNs
 function MomentumOptimizer!(net::Network, weight_grad, bias_grad)
     net.params["weights_momentum_vector"] = net.params["gamma"] * net.params["weights_momentum_vector"] + net.params["learning_rate"] * weight_grad
     net.weights = net.weights .- net.params["weights_momentum_vector"]
